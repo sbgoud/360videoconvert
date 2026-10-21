@@ -1,0 +1,13 @@
+node_modules/
+output/
+tmp/
+*.tmp
+*.download
+*_original
+# OAuth secrets - never commit
+client_secret*.json
+token*.json
+credentials*.json
+.secrets/
+360videoconvert-secrets/
+.env
