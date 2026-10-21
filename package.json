@@ -1,0 +1,17 @@
+{
+  "name": "360videoconvert",
+  "version": "2.0.0",
+  "description": "Turn a YouTube video into a 360° theatre-experience video with hall audio and spherical metadata, with optional YouTube upload.",
+  "main": "program.js",
+  "scripts": {
+    "convert": "node program.js",
+    "upload": "node upload.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "googleapis": "^187.0.0"
+  },
+  "license": "MIT"
+}
