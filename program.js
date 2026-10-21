@@ -201,7 +201,15 @@ function downloadFromYouTube(url, tmp, opts) {
   ];
   if (opts.section) args.push('--download-sections', `*${opts.section}`, '--force-keyframes-at-cuts');
   args.push(url);
-  run('yt-dlp', args);
+  // YouTube sometimes answers with a transient "confirm you're not a bot" check; retry a few times.
+  for (let attempt = 1; ; attempt++) {
+    try { run('yt-dlp', args); break; } catch (err) {
+      if (attempt >= 3) throw err;
+      console.warn(`   yt-dlp failed (attempt ${attempt}/3), retrying in ${attempt * 20}s...`);
+      for (const f of fs.readdirSync(tmp)) fs.rmSync(path.join(tmp, f), { recursive: true, force: true });
+      spawnSync('sleep', [String(attempt * 20)]);
+    }
+  }
 
   const video = findFile(tmp, 'source', VIDEO_EXTS);
   if (!video) throw new Error(`yt-dlp finished but no video file was found in ${tmp}: ${fs.readdirSync(tmp).join(', ')}`);
