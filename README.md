@@ -35,7 +35,7 @@ Options:
 | Option | What it does |
 | --- | --- |
 | `--file <path>` | Convert a local video instead of a YouTube link |
-| `--title <text>` | Override the title, which is used for file names and upload |
+| `--title <text>` | Custom title. It is used as the YouTube title and, sanitized, as the output file name. Defaults to the video's own title (or the file name with `--file`) |
 | `--section 0:30-1:10` | Only download part of the YouTube video |
 | `--crf 18` | Video quality (lower is better and larger, default 18) |
 | `--preset medium` | x264 speed/size trade-off (`veryfast` … `slow`) |
@@ -43,7 +43,11 @@ Options:
 | `--keep-temp` | Keep the per-run temp folder for debugging |
 | `--upload` | Upload to YouTube after converting (see below) |
 | `--privacy private` | `private` / `unlisted` / `public` for the upload |
-| `--description <text>`, `--tags a,b,c` | Upload metadata |
+| `--description <text>` | Upload description (`\n` = line break) |
+| `--description-file <path>` | Read a long, multi-line description from a text file |
+| `--tags a,b,c` | Upload tags, comma separated |
+| `--category <id>` | YouTube category (default `24` Entertainment) |
+| `--dry-run` | Check everything and print the planned files and upload metadata, then stop. Nothing is downloaded, encoded or uploaded |
 
 Each run works in its own temp folder, which is deleted at the end, so you can run several videos one after another without overwriting anything.
 
@@ -71,10 +75,27 @@ Uploads use the official YouTube Data API v3 with OAuth.
 4. Upload:
 
    ```bash
-   node upload.js upload "output/My Video.mp4" --title "My Video" --tags "theatre,360" --privacy private
-   # or convert + upload in one go
-   node program.js "https://youtu.be/VIDEO_ID" --upload --privacy private
+   # convert + upload in one go, with your own title/description
+   node program.js "https://youtu.be/VIDEO_ID" --upload \
+     --title "Movie Trailer | 360° Theatre Experience 🎧" \
+     --description-file description.txt \
+     --tags "360,theatre experience,dolby surround" \
+     --privacy private
+
+   # upload an mp4 you already converted
+   node upload.js upload "output/My Video.mp4" \
+     --title "My Video | 360° Theatre Experience" \
+     --description "Use headphones 🎧\nDrag to look around" \
+     --thumbnail "output/My Video.jpg" \
+     --tags "360,theatre" --privacy private
+
+   # preview exactly what would be sent, without uploading
+   node upload.js upload "output/My Video.mp4" --title "..." --description-file description.txt --dry-run
+   node program.js "https://youtu.be/VIDEO_ID" --upload --title "..." --dry-run
    ```
+
+   `upload.js upload` options: `--title` (default: the mp4 file name), `--description` or `--description-file` (pick one), `--tags`, `--thumbnail` (default: the `.jpg` with the same name next to the mp4), `--privacy` (default `private`), `--category`, `--dry-run`.
+   YouTube limits are checked before anything uploads, or before the slow encode when you use `program.js --upload`: title up to 100 characters, description up to 5000 bytes, tags up to 500 characters in total, and no `<` or `>`.
 
    The matching `.jpg` thumbnail is uploaded too. Custom thumbnails require a phone-verified channel (https://www.youtube.com/verify). If setting it fails, the video still uploads.
 

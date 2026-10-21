@@ -8,9 +8,15 @@
  *                                           Finish approval: paste the full
  *                                           http://localhost/?code=... URL your
  *                                           browser landed on (or just the code)
- *   node upload.js upload <video.mp4> [--thumbnail img.jpg] [--title t]
- *                 [--description d] [--tags a,b,c] [--privacy private|unlisted|public]
- *                 [--category 24]
+ *   node upload.js upload <video.mp4> [options]
+ *       --title <text>            YouTube title (default: the mp4 file name)
+ *       --description <text>      Description (use \n for line breaks)
+ *       --description-file <path> Read a long / multi-line description from a file
+ *       --tags <a,b,c>            Comma-separated tags
+ *       --thumbnail <img.jpg>     Custom thumbnail (default: same name .jpg next to the mp4)
+ *       --privacy <status>        private | unlisted | public (default private)
+ *       --category <id>           YouTube category id (default 24 = Entertainment)
+ *       --dry-run                 Print what would be uploaded, upload nothing
  *   node upload.js status                   Check whether a token is saved
  *
  * Files (never commit these):
@@ -96,13 +102,64 @@ function authorizedClient() {
   return client;
 }
 
-async function uploadVideo({ file, thumbnail, title, description = '', tags = [], privacyStatus = 'private', categoryId = '24' }) {
+const PRIVACY = ['private', 'unlisted', 'public'];
+
+function parseTags(tags) {
+  if (Array.isArray(tags)) return tags.map((t) => String(t).trim()).filter(Boolean);
+  return String(tags || '').split(',').map((t) => t.trim()).filter(Boolean);
+}
+
+function readDescription({ description, descriptionFile }) {
+  if (description !== undefined && descriptionFile !== undefined) {
+    throw new Error('Use either --description or --description-file, not both.');
+  }
+  if (descriptionFile !== undefined) {
+    if (!fs.existsSync(descriptionFile)) throw new Error(`Description file not found: ${descriptionFile}`);
+    return fs.readFileSync(descriptionFile, 'utf8').replace(/\r\n/g, '\n').replace(/\s+$/, '');
+  }
+  // Allow "\n" typed on the command line to mean a line break.
+  return description === undefined ? '' : String(description).replace(/\\n/g, '\n');
+}
+
+/** Build and validate the YouTube snippet/status exactly as it will be sent. */
+function buildMetadata({ file, title, description = '', tags = [], privacyStatus = 'private', categoryId = '24' }) {
+  const finalTitle = String(title && String(title).trim() ? title : path.parse(file).name.slice(0, 100)).replace(/[<>]/g, '').trim();
+  if (!finalTitle) throw new Error('Title is empty.');
+  if (finalTitle.length > 100) throw new Error(`Title is ${finalTitle.length} characters; YouTube allows 100.`);
+  const desc = String(description).replace(/[<>]/g, '');
+  if (Buffer.byteLength(desc, 'utf8') > 5000) throw new Error(`Description is ${Buffer.byteLength(desc, 'utf8')} bytes; YouTube allows 5000.`);
+  const tagList = parseTags(tags).map((t) => t.replace(/[<>,]/g, ''));
+  const tagChars = tagList.reduce((n, t) => n + t.length + (t.includes(' ') ? 2 : 0), 0) + Math.max(tagList.length - 1, 0);
+  if (tagChars > 500) throw new Error(`Tags total ${tagChars} characters; YouTube allows 500.`);
+  if (!PRIVACY.includes(privacyStatus)) throw new Error('--privacy must be private, unlisted or public');
+  return {
+    snippet: { title: finalTitle, description: desc, tags: tagList, categoryId: String(categoryId) },
+    status: { privacyStatus, selfDeclaredMadeForKids: false },
+  };
+}
+
+function printDryRun({ file, thumbnail }, meta) {
+  const size = fs.existsSync(file) ? `${(fs.statSync(file).size / 1e6).toFixed(1)} MB` : '(file not created yet)';
+  console.log('DRY RUN - nothing will be uploaded.');
+  console.log(`  File:        ${file}  ${size}`);
+  console.log(`  Thumbnail:   ${thumbnail || '(none)'}`);
+  console.log(`  Title:       ${meta.snippet.title}`);
+  console.log(`  Privacy:     ${meta.status.privacyStatus}`);
+  console.log(`  Category:    ${meta.snippet.categoryId}`);
+  console.log(`  Tags:        ${meta.snippet.tags.length ? meta.snippet.tags.join(', ') : '(none)'}`);
+  console.log(`  Description (${meta.snippet.description.length} chars):`);
+  console.log(meta.snippet.description ? meta.snippet.description.split('\n').map((l) => '    | ' + l).join('\n') : '    (empty)');
+}
+
+async function uploadVideo({ file, thumbnail, title, description = '', tags = [], privacyStatus = 'private', categoryId = '24', dryRun = false }) {
+  const meta = buildMetadata({ file, title, description, tags, privacyStatus, categoryId });
+  if (dryRun) { printDryRun({ file, thumbnail }, meta); return null; }
   if (!file || !fs.existsSync(file)) throw new Error(`Video not found: ${file}`);
   const google = loadGoogle();
   const auth = authorizedClient();
   const youtube = google.youtube({ version: 'v3', auth });
+  const safeTitle = meta.snippet.title;
   const size = fs.statSync(file).size;
-  const safeTitle = String(title || path.parse(file).name).replace(/[<>]/g, '').slice(0, 100);
 
   console.log(`Uploading "${safeTitle}" (${(size / 1e6).toFixed(1)} MB, ${privacyStatus})...`);
   let last = -1;
@@ -111,8 +168,8 @@ async function uploadVideo({ file, thumbnail, title, description = '', tags = []
       part: ['snippet', 'status'],
       notifySubscribers: privacyStatus === 'public',
       requestBody: {
-        snippet: { title: safeTitle, description: String(description).slice(0, 5000), tags, categoryId: String(categoryId) },
-        status: { privacyStatus, selfDeclaredMadeForKids: false },
+        snippet: meta.snippet,
+        status: meta.status,
       },
       media: { body: fs.createReadStream(file) },
     },
@@ -145,10 +202,18 @@ function apiError(err) {
 }
 
 function parseFlags(argv) {
+  const BOOL = ['dry-run'];
+  const VALUE = ['title', 'description', 'description-file', 'tags', 'thumbnail', 'privacy', 'category'];
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i].startsWith('--')) out[argv[i].slice(2)] = argv[++i];
-    else out._.push(argv[i]);
+    const a = argv[i];
+    if (!a.startsWith('--')) { out._.push(a); continue; }
+    const name = a.slice(2);
+    if (BOOL.includes(name)) out[name] = true;
+    else if (VALUE.includes(name)) {
+      if (argv[i + 1] === undefined) throw new Error(`${a} needs a value`);
+      out[name] = argv[++i];
+    } else throw new Error(`Unknown option ${a}`);
   }
   return out;
 }
@@ -170,28 +235,32 @@ async function cli() {
       break;
     case 'upload': {
       const f = parseFlags(rest);
-      if (!f._[0]) throw new Error('Usage: node upload.js upload <video.mp4> [--thumbnail img.jpg] [--title ...]');
-      const privacy = f.privacy || 'private';
-      if (!['private', 'unlisted', 'public'].includes(privacy)) throw new Error('--privacy must be private, unlisted or public');
-      const guessThumb = f._[0].replace(/\.mp4$/i, '.jpg');
+      if (!f._[0]) throw new Error('Usage: node upload.js upload <video.mp4> [--title ...] [--description ... | --description-file ...] [--tags a,b] [--thumbnail img.jpg] [--privacy private] [--dry-run]');
+      if (f._.length > 1) throw new Error(`Unexpected argument ${f._[1]} (quote titles/descriptions that contain spaces)`);
+      const file = f._[0];
+      if (!fs.existsSync(file)) throw new Error(`Video not found: ${file}`);
+      if (f.thumbnail && !fs.existsSync(f.thumbnail)) throw new Error(`Thumbnail not found: ${f.thumbnail}`);
+      const guessThumb = file.replace(/\.mp4$/i, '.jpg');
       await uploadVideo({
-        file: f._[0],
-        thumbnail: f.thumbnail || (fs.existsSync(guessThumb) ? guessThumb : undefined),
+        file,
+        thumbnail: f.thumbnail || (guessThumb !== file && fs.existsSync(guessThumb) ? guessThumb : undefined),
         title: f.title,
-        description: f.description || '',
-        tags: (f.tags || '').split(',').map((t) => t.trim()).filter(Boolean),
-        privacyStatus: privacy,
+        description: readDescription({ description: f.description, descriptionFile: f['description-file'] }),
+        tags: f.tags,
+        privacyStatus: f.privacy || 'private',
         categoryId: f.category || '24',
+        dryRun: Boolean(f['dry-run']),
       });
       break;
     }
+    case 'help': case '--help': case '-h':
     default:
       console.log(fs.readFileSync(__filename, 'utf8').split('*/')[0].replace(/^#!.*\n\/\*\*?/, '').replace(/^ ?\* ?/gm, ''));
-      process.exit(cmd ? 1 : 0);
+      process.exit(!cmd || ['help', '--help', '-h'].includes(cmd) ? 0 : 1);
   }
 }
 
-module.exports = { uploadVideo, authUrl, finishAuth };
+module.exports = { uploadVideo, buildMetadata, readDescription, parseTags, authUrl, finishAuth };
 
 if (require.main === module) {
   cli().catch((err) => {

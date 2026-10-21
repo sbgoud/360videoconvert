@@ -10,7 +10,9 @@
  *
  * Options:
  *   --file <path>        Use a local video instead of downloading from YouTube
- *   --title <text>       Title used for output file names (and upload title)
+ *   --title <text>       Custom title: used as the YouTube upload title and (sanitized)
+ *                        as the output file name. Default: the YouTube video's title
+ *                        (or the local file name with --file)
  *   --section <range>    Only download part of the YouTube video, e.g. "0:30-1:10"
  *   --crf <n>            libx264 quality (default 18; lower = better/larger)
  *   --preset <name>      libx264 preset (default medium)
@@ -18,8 +20,13 @@
  *   --keep-temp          Do not delete the per-run temp folder
  *   --upload             Upload the result to YouTube afterwards (see upload.js)
  *   --privacy <status>   private | unlisted | public (default private, for --upload)
- *   --description <text> Upload description
+ *   --description <text> Upload description (use \n for line breaks)
+ *   --description-file <path>
+ *                        Read a long / multi-line upload description from a file
  *   --tags <a,b,c>       Upload tags (comma separated)
+ *   --category <id>      YouTube category id (default 24 = Entertainment)
+ *   --dry-run            Validate everything and print the planned output files and
+ *                        upload metadata, then stop (no download, encode or upload)
  */
 'use strict';
 
@@ -54,16 +61,17 @@ function die(msg) {
 
 function parseArgs(argv) {
   const opts = { crf: 18, preset: 'medium', out: path.join(ROOT, 'output'), privacy: 'private', tags: [] };
-  const valueFlags = ['file', 'title', 'section', 'crf', 'preset', 'out', 'privacy', 'description', 'tags'];
+  const valueFlags = ['file', 'title', 'section', 'crf', 'preset', 'out', 'privacy', 'description', 'description-file', 'tags', 'category'];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-h' || a === '--help') opts.help = true;
     else if (a === '--upload') opts.upload = true;
     else if (a === '--keep-temp') opts.keepTemp = true;
+    else if (a === '--dry-run') opts.dryRun = true;
     else if (a.startsWith('--') && valueFlags.includes(a.slice(2))) {
       const v = argv[++i];
       if (v === undefined) die(`${a} needs a value`);
-      opts[a.slice(2)] = v;
+      opts[a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = v;
     } else if (a.startsWith('--')) die(`Unknown option ${a}`);
     else if (!opts.url) opts.url = a;
     else die(`Unexpected argument ${a}`);
@@ -228,6 +236,43 @@ async function main() {
 
   preflight(Boolean(opts.url));
 
+  // Read and validate upload metadata up front so a bad description/tag fails before the slow encode.
+  const uploader = require('./upload');
+  let description;
+  try {
+    description = uploader.readDescription({ description: opts.description, descriptionFile: opts.descriptionFile });
+  } catch (err) { die(err.message); }
+  // An explicit --title must fit YouTube's 100-char limit; a default title is trimmed to fit.
+  const uploadMeta = (title, file) => ({
+    file, title: opts.title ? opts.title : String(title).slice(0, 100), description, tags: opts.tags, privacyStatus: opts.privacy, categoryId: opts.category || '24',
+  });
+
+  if (opts.dryRun) {
+    let title = opts.title;
+    if (!title && opts.url) {
+      try {
+        const info = JSON.parse(run('yt-dlp', [...ytdlpBaseArgs(), '-J', '--skip-download', opts.url], { capture: true }));
+        title = info.title || info.id;
+      } catch (err) { die(err.message); }
+    }
+    if (!title) title = path.parse(opts.file).name;
+    const base = sanitize(title);
+    const outVideo = uniquePath(opts.out, base, '.mp4');
+    console.log('DRY RUN - no download, encode or upload.');
+    console.log(`  Source:      ${opts.url || path.resolve(opts.file)}${opts.section ? `  (section ${opts.section})` : ''}`);
+    console.log(`  Encode:      libx264 crf ${opts.crf}, preset ${opts.preset}, 3840x2160 + AAC 192k`);
+    console.log(`  Output mp4:  ${outVideo}`);
+    console.log(`  Output jpg:  ${path.join(opts.out, path.parse(outVideo).name + '.jpg')}`);
+    console.log(`  Upload:      ${opts.upload ? 'yes' : 'no (add --upload)'}`);
+    try {
+      await uploader.uploadVideo({ ...uploadMeta(title, outVideo), thumbnail: path.join(opts.out, path.parse(outVideo).name + '.jpg'), dryRun: true });
+    } catch (err) { die(err.message); }
+    return;
+  }
+  if (opts.upload && opts.title) {
+    try { uploader.buildMetadata(uploadMeta(opts.title, 'x.mp4')); } catch (err) { die(err.message); }
+  }
+
   console.log('0. Checking theatre assets...');
   const theatreImg = ensureAsset(THEATRE.asset);
   const thumbBg = ensureAsset(THUMB.asset);
@@ -307,15 +352,7 @@ async function main() {
 
     if (opts.upload) {
       console.log('\n10. Uploading to YouTube...');
-      const { uploadVideo } = require('./upload');
-      await uploadVideo({
-        file: outVideo,
-        thumbnail: outThumb,
-        title: src.title,
-        description: opts.description !== undefined ? opts.description : '',
-        tags: opts.tags,
-        privacyStatus: opts.privacy,
-      });
+      await uploader.uploadVideo({ ...uploadMeta(src.title, outVideo), thumbnail: outThumb });
     }
   } catch (err) {
     cleanup();
