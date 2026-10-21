@@ -103,6 +103,49 @@ Notes:
 - Until Google verifies your API project ("audit"), videos uploaded through the API are locked to **private**. Make them public in YouTube Studio, or apply for the audit.
 - The default quota is 10,000 units/day, and each upload costs about 1,600, so you get about 6 uploads/day. You can request more in the same audit.
 
+## Batch runner (convert + upload, with a daily cap)
+
+```bash
+node batch.js "https://youtu.be/ID1" "https://www.youtube.com/watch?v=ID2" ...
+node batch.js            # no links: just upload queued videos if the quota day has reset
+```
+
+For each link, `batch.js`:
+
+1. Gets the video id and skips ids already listed in `processed.txt`.
+2. Reads the original title, description and tags with yt-dlp:
+   - **Title:** the original, trimmed to 100 characters.
+   - **Description:** the original, trimmed to 5000 bytes if needed.
+   - **Tags:** the original tags plus `360theatreexperience, 360, theatre experience, 360 theatre`, kept within 500 characters.
+3. Converts the video with `program.js`.
+4. Uploads it **private** with the thumbnail.
+
+At most **5 uploads per YouTube quota day**, which resets at midnight America/Los_Angeles. Videos over the limit are still converted, then appended to `queue.txt`. Each run uploads queued videos first, once the day has reset.
+
+State files live in `/workspace/360out` (override with `STATE_DIR`):
+
+- `processed.txt`: one line per source id that has been uploaded
+- `queue.txt`: queued videos, one JSON line each
+- `daily_uploads.json`: the quota day, today's upload count, and which notifications have already been sent
+
+`DAILY_LIMIT` and `PRIVACY` can be overridden with environment variables.
+
+stdout carries only a JSON summary (progress goes to stderr):
+
+```json
+{
+  "uploaded": [{ "title": "...", "videoId": "...", "studioUrl": "https://studio.youtube.com/video/<id>/edit" }],
+  "queued": [{ "url": "...", "title": "...", "file": "..." }],
+  "failed": [{ "url": "...", "error": "..." }],
+  "limitReachedNow": false,
+  "resetTimeDubai": "11:00 AM Dubai",
+  "resetJustHappenedWithQueuedUploads": false,
+  "uploadsToday": 1, "dailyLimit": 5, "queueLength": 0
+}
+```
+
+`limitReachedNow` and `resetJustHappenedWithQueuedUploads` are each true at most once per quota day, so you can use them to send one notification.
+
 ## Copyright
 
 Re-uploading trailers and songs you don't own can get Content ID claims or copyright strikes. Use content you have the rights to.
